@@ -28,6 +28,9 @@ function plural(n, one, few, many) {
 }
 const lessonsWord = n => plural(n, "занятие", "занятия", "занятий");
 
+/* маленькое фирменное солнце для пустых состояний — вместо системного эмодзи */
+const SUN_INLINE = `<svg viewBox="0 0 20 20" width="14" height="14" style="display:inline-block;vertical-align:-2px;margin-left:5px"><circle cx="10" cy="10" r="3.6" fill="var(--accent)"/><g stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"><path d="M10 1.8v2.4M10 15.8v2.4M1.8 10h2.4M15.8 10h2.4M4.2 4.2l1.7 1.7M14.1 14.1l1.7 1.7M15.8 4.2l-1.7 1.7M5.9 14.1l-1.7 1.7"/></g></svg>`;
+
 function esc(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -40,10 +43,11 @@ function el(html) {
 }
 
 function initials(name) {
-  const clean = name.replace(/[«»"]/g, "").trim();
+  const clean = String(name || "").replace(/[«»"]/g, "").trim();
   const parts = clean.split(/\s+/).filter(Boolean);
   if (!parts.length) return "•";
-  return (parts[0][0] + (parts[1] ? parts[1][0] : "")).toUpperCase();
+  /* результат уходит прямо в innerHTML — экранируем здесь же */
+  return esc((parts[0][0] + (parts[1] ? parts[1][0] : "")).toUpperCase());
 }
 
 const KIND_META = {
@@ -62,7 +66,7 @@ function typeLabelOf(s) {
 /* счётчик-анимация чисел */
 function countUp(node, target, format) {
   format = format || (v => fmtMoney(v));
-  if (REDUCED) { node.textContent = format(target); return; }
+  if (REDUCED || !animateEntry) { node.textContent = format(target); return; }
   const dur = 650, start = performance.now();
   const tick = now => {
     const p = Math.min(1, (now - start) / dur);
@@ -88,9 +92,14 @@ function toast(msg, icon) {
 /* ═══════════ модалки ═══════════ */
 
 let modalCleanup = null;
+let modalHideTimer = null;
+let modalReturnFocus = null;
+let modalTitleSeq = 0;
 
 function openModal(contentEl, opts = {}) {
+  clearTimeout(modalHideTimer);
   closeModal(true);
+  modalReturnFocus = document.activeElement;
   const layer = $("#modal-layer");
   layer.hidden = false;
   layer.classList.toggle("drawer-mode", !!opts.drawer);
@@ -98,7 +107,27 @@ function openModal(contentEl, opts = {}) {
   const backdrop = el(`<div class="modal-backdrop"></div>`);
   layer.append(backdrop, contentEl);
   backdrop.addEventListener("click", () => closeModal());
-  const onKey = e => { if (e.key === "Escape") closeModal(); };
+
+  /* заголовок диалога — в aria-labelledby */
+  const h = contentEl.querySelector("h3");
+  if (h) {
+    if (!h.id) h.id = "modal-title-" + (++modalTitleSeq);
+    contentEl.setAttribute("aria-labelledby", h.id);
+  }
+
+  const onKey = e => {
+    if (e.key === "Escape") { closeModal(); return; }
+    /* focus trap: Tab не уходит из диалога */
+    if (e.key === "Tab") {
+      const focusables = $$("input, select, textarea, button, [tabindex='0']", contentEl)
+        .filter(n => !n.disabled && n.offsetParent !== null);
+      if (!focusables.length) return;
+      const first = focusables[0], last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      else if (!contentEl.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+    }
+  };
   document.addEventListener("keydown", onKey);
   modalCleanup = () => document.removeEventListener("keydown", onKey);
   const focusable = contentEl.querySelector("input, select, textarea, button");
@@ -107,11 +136,17 @@ function openModal(contentEl, opts = {}) {
 
 function closeModal(instant) {
   const layer = $("#modal-layer");
+  clearTimeout(modalHideTimer);
   if (layer.hidden) return;
   if (modalCleanup) { modalCleanup(); modalCleanup = null; }
-  if (instant || REDUCED) { layer.hidden = true; layer.innerHTML = ""; return; }
+  if (modalReturnFocus && document.contains(modalReturnFocus)) {
+    modalReturnFocus.focus({ preventScroll: true });
+  }
+  modalReturnFocus = null;
+  const wipe = () => { layer.hidden = true; layer.innerHTML = ""; layer.classList.remove("closing"); };
+  if (instant || REDUCED) { wipe(); return; }
   layer.classList.add("closing");
-  setTimeout(() => { layer.hidden = true; layer.innerHTML = ""; layer.classList.remove("closing"); }, 140);
+  modalHideTimer = setTimeout(wipe, 140);
 }
 
 function confirmDialog(title, text, okLabel, danger) {
@@ -141,6 +176,10 @@ function closePopover() {
   const layer = $("#popover-layer");
   layer.innerHTML = "";
   document.removeEventListener("click", popoverOutside, true);
+  document.removeEventListener("keydown", popoverKey);
+}
+function popoverKey(e) {
+  if (e.key === "Escape") closePopover();
 }
 function popoverOutside(e) {
   if (!e.target.closest(".popover")) closePopover();
@@ -162,7 +201,10 @@ function openPopover(anchorRect, contentEl) {
       contentEl.style.top = (y - (r.bottom - window.innerHeight) - 12) + "px";
     }
   });
-  setTimeout(() => document.addEventListener("click", popoverOutside, true), 0);
+  setTimeout(() => {
+    document.addEventListener("click", popoverOutside, true);
+    document.addEventListener("keydown", popoverKey);
+  }, 0);
 }
 
 /* ═══════════ роутер ═══════════ */
@@ -192,9 +234,15 @@ function currentRoute() {
   return VIEWS[h] ? h : "dashboard";
 }
 
+/* входную хореографию (stagger, count-up, рост баров) играем один раз
+   на смену экрана; повторный рендер того же экрана после клика — без шоу */
+let animateEntry = true;
+
 function render() {
   closePopover();
   const route = currentRoute();
+  animateEntry = ui.lastRoute !== route;
+  ui.lastRoute = route;
   ui.route = route;
   const view = $("#view");
   const def = VIEWS[route];
@@ -204,10 +252,15 @@ function render() {
   $("#view-subtitle").textContent = subtitleFor(route);
 
   view.classList.remove("view-enter");
+  view.onclick = null;
+  view.onkeydown = null;
   view.innerHTML = "";
+  view.classList.toggle("no-anim", !animateEntry);
   def.render(view);
-  void view.offsetWidth;
-  view.classList.add("view-enter");
+  if (animateEntry) {
+    void view.offsetWidth;
+    view.classList.add("view-enter");
+  }
 
   updateRemindersBadge();
   $("#sidebar").classList.remove("open");
@@ -274,7 +327,7 @@ function renderDashboard(view) {
         <span class="kpi-hint">${weekLessons.filter(l => l.status === "done").length} уже проведено</span>
       </div>
       <div class="card kpi" style="--i:3">
-        <span class="kpi-label"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 6.5V10l2.4 2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>Ожидается оплат</span>
+        <span class="kpi-label"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 6.5V10l2.4 2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>Предстоящие оплаты</span>
         <span class="kpi-value" data-count="${expectSum}">0 ₽</span>
         <span class="kpi-hint">${renewals.length} ${plural(renewals.length, "продление", "продления", "продлений")} в ближайшие 30 дней</span>
       </div>
@@ -350,7 +403,7 @@ function renderDashboard(view) {
   /* требуют внимания */
   const attn = $("#attn-list", view);
   if (!attention.length) {
-    attn.innerHTML = `<div class="empty-note">Все абонементы в порядке 🌞</div>`;
+    attn.innerHTML = `<div class="empty-note">Все абонементы в порядке${SUN_INLINE}</div>`;
   } else {
     attention.slice(0, 4).forEach(r => {
       const k = kindOfStudent(r.student);
@@ -368,7 +421,7 @@ function renderDashboard(view) {
     });
   }
 
-  view.addEventListener("click", e => {
+  view.onclick = e => {
     const nav = e.target.closest("[data-nav]");
     if (nav) { navigate(nav.dataset.nav); return; }
     const done = e.target.closest("[data-done]");
@@ -377,7 +430,7 @@ function renderDashboard(view) {
       toast("Занятие отмечено проведённым");
       render();
     }
-  });
+  };
 }
 
 /* график выручки: один ряд → один тон, подсказка по ховеру */
@@ -411,7 +464,7 @@ function renderRevenueChart(wrap, months) {
       </g>`;
   });
 
-  wrap.innerHTML = `<svg class="chart-svg ${REDUCED ? "" : "chart-anim"}" viewBox="0 0 ${W} ${H}">${grid}${labels}${bars}</svg>`;
+  wrap.innerHTML = `<svg class="chart-svg ${REDUCED || !animateEntry ? "" : "chart-anim"}" viewBox="0 0 ${W} ${H}">${grid}${labels}${bars}</svg>`;
 
   const tip = el(`<div class="chart-tip"></div>`);
   document.body.appendChild(tip);
@@ -498,15 +551,25 @@ function renderCalendar(view) {
 
 function drawWeek(body) {
   const s = Store.state.settings;
-  const H0 = s.workStart, H1 = s.workEnd;
   const hourH = 52;
   const days = Array.from({ length: 7 }, (_, i) => addDays(ui.weekStart, i));
   const tIso = iso(today());
 
+  /* границы сетки: рабочие часы, расширенные под занятия вне их —
+     ничего не должно молча пропадать из недели */
+  let H0 = s.workStart, H1 = s.workEnd;
+  days.forEach(d => {
+    Store.lessonsOnDate(iso(d)).forEach(l => {
+      const [hh, mm] = l.time.split(":").map(Number);
+      H0 = Math.min(H0, hh);
+      H1 = Math.max(H1, Math.ceil((hh * 60 + mm + l.durationMin) / 60));
+    });
+  });
+
   const range = `${fmtDayShort(days[0])} — ${fmtDayShort(days[6])} ${days[6].getFullYear()}`;
   $("#cal-range").textContent = range;
 
-  let head = `<div></div>`;
+  let head = `<div class="week-head week-head-corner"></div>`;
   days.forEach(d => {
     head += `<div class="week-head ${iso(d) === tIso ? "is-today" : ""}">
       <div class="dow">${fmtDow(d)}</div><span class="dnum">${d.getDate()}</span></div>`;
@@ -528,12 +591,11 @@ function drawWeek(body) {
     }
     lessons.forEach((l, li) => {
       const [hh, mm] = l.time.split(":").map(Number);
-      if (hh < H0 || hh >= H1) return;
       const top = (hh - H0) * hourH + (mm / 60) * hourH;
       const height = Math.max(24, (l.durationMin / 60) * hourH - 3);
       const st = Store.student(l.studentId);
       evs += `<div class="ev k-${l.kind} ${l.status === "done" ? "is-done" : ""} ${l.status === "canceled" ? "is-canceled" : ""}"
-        data-lesson="${l.id}" style="top:${top}px;height:${height}px;--i:${di + li}">
+        data-lesson="${l.id}" tabindex="0" role="button" style="top:${top}px;height:${height}px;--i:${di + li}">
         <b>${esc(st ? st.name : "—")}</b><small>${l.time} · ${l.durationMin}′</small>
       </div>`;
     });
@@ -556,6 +618,11 @@ function drawWeek(body) {
     if (ev) { lessonPopover(ev); return; }
     const hit = e.target.closest(".slot-hit");
     if (hit) lessonModal({ date: hit.dataset.date, time: hit.dataset.time });
+  };
+  body.onkeydown = e => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const ev = e.target.closest("[data-lesson]");
+    if (ev) { e.preventDefault(); lessonPopover(ev); }
   };
 }
 
@@ -628,7 +695,11 @@ function lessonPopover(anchor) {
     const b = e.target.closest("[data-act]");
     if (!b) return;
     const act = b.dataset.act;
-    if (act === "done") { Store.completeLesson(l.id); toast("Занятие проведено — списано с абонемента"); closePopover(); render(); }
+    if (act === "done") {
+      Store.completeLesson(l.id);
+      toast(Store.passOf(l.studentId) ? "Занятие проведено — списано с абонемента" : "Занятие проведено");
+      closePopover(); render();
+    }
     if (act === "undone") { Store.uncompleteLesson(l.id); closePopover(); render(); }
     if (act === "cancel") {
       closePopover();
@@ -682,7 +753,7 @@ function renderStudents(view) {
       const rem = p ? p.size - p.used : 0;
       const meterCls = p ? (rem <= 1 ? "m-danger" : rem <= 3 ? "m-warn" : "") : "";
       grid.appendChild(el(`
-        <div class="card student-card" data-student="${s.id}" style="--i:${i}">
+        <div class="card student-card" data-student="${s.id}" tabindex="0" role="button" style="--i:${i}">
           <div class="student-card-top">
             <span class="avatar c-${k}">${initials(s.name)}</span>
             <span><b>${esc(s.name)}</b><small>${esc(s.tg || "")}</small></span>
@@ -714,6 +785,11 @@ function renderStudents(view) {
   grid.addEventListener("click", e => {
     const c = e.target.closest("[data-student]");
     if (c) studentDrawer(c.dataset.student);
+  });
+  grid.addEventListener("keydown", e => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const c = e.target.closest("[data-student]");
+    if (c) { e.preventDefault(); studentDrawer(c.dataset.student); }
   });
 }
 
@@ -843,7 +919,7 @@ function renderFinance(view) {
         <span class="kpi-value" data-count="${avg}">0 ₽</span>
       </div>
       <div class="card kpi" style="--i:3">
-        <span class="kpi-label">Ожидается продлений</span>
+        <span class="kpi-label">Предстоящие продления</span>
         <span class="kpi-value" data-count="${expectSum}">0 ₽</span>
         <span class="kpi-hint">${renewals.length} ${plural(renewals.length, "ученик", "ученика", "учеников")}</span>
       </div>
@@ -889,7 +965,7 @@ function renderFinance(view) {
         <tr>
           <td><div style="display:flex;gap:10px;align-items:center"><span class="avatar c-${k}" style="width:30px;height:30px;font-size:11.5px">${initials(r.student.name)}</span><b>${esc(r.student.name)}</b></div></td>
           <td>${r.overdue ? `<span class="tag t-danger">закончился</span>` : `осталось <b>${rem}</b> ${lessonsWord(rem)}`}</td>
-          <td class="num">${r.overdue ? "—" : fmtDayShort(r.dueDate)}</td>
+          <td class="num">${r.overdue ? "—" : (r.approx ? "~" : "") + fmtDayShort(r.dueDate)}</td>
           <td class="num">${fmtMoney(r.amount)}</td>
           <td>${remind ? (remind.sentAt ? `<span class="tag t-ok">отправлено ${fmtDayShort(fromIso(remind.sentAt))}</span>` : `<span class="tag t-warn">ждёт отправки</span>`) : `<span class="sub">рано</span>`}</td>
           <td style="text-align:right"><button class="btn btn-sm btn-soft" data-pay="${r.student.id}">Принять оплату</button></td>
@@ -910,11 +986,11 @@ function renderFinance(view) {
       </tr>`));
   });
 
-  view.addEventListener("click", e => {
+  view.onclick = e => {
     const pay = e.target.closest("[data-pay]");
     if (pay) { paymentModal(pay.dataset.pay); return; }
     if (e.target.closest("#btn-pay-any")) paymentModal();
-  });
+  };
 }
 
 function methodIcon(m) {
@@ -928,7 +1004,13 @@ function methodIcon(m) {
 function buildReminderText(r) {
   const s = Store.state.settings;
   const tpl = r.stage === "final" ? s.tplFinal : s.tplSoft;
-  const name = r.student.name.split(" ")[0];
+  /* дети: пишем родителю (имя берём из контакта «(мама Ольга)»), группа — общее обращение */
+  let name = r.student.name.split(" ")[0];
+  if (r.student.type === "kid") {
+    const parent = /\((?:мама|папа)\s+([А-ЯЁA-Z][^)\s]*)\)/.exec(r.student.tg || "");
+    name = parent ? parent[1] : name;
+  }
+  if (r.student.type === "group") name = "Друзья";
   return tpl
     .replaceAll("{имя}", name)
     .replaceAll("{осталось}", `${r.remaining} ${lessonsWord(r.remaining)}`)
@@ -976,7 +1058,7 @@ function renderReminders(view) {
 
   const pl = $("#pending-list", view);
   if (!pending.length) {
-    pl.innerHTML = `<div class="empty-note">Сейчас напоминать некому — все абонементы в порядке 🌞</div>`;
+    pl.innerHTML = `<div class="empty-note">Сейчас напоминать некому — все абонементы в порядке${SUN_INLINE}</div>`;
   } else {
     pending.forEach(r => {
       const k = kindOfStudent(r.student);
@@ -1016,15 +1098,15 @@ function renderReminders(view) {
     });
   }
 
-  view.addEventListener("click", async e => {
+  view.onclick = async e => {
     const copy = e.target.closest("[data-copy]");
     if (copy) {
       const r = all.find(x => x.key === copy.dataset.copy);
       try {
         await navigator.clipboard.writeText(buildReminderText(r));
-        toast("Текст скопирован — вставь в чат с учеником");
+        toast("Текст скопирован — вставьте в чат с учеником");
       } catch (_) {
-        toast("Не удалось скопировать — выдели текст вручную");
+        toast("Не удалось скопировать — выделите текст вручную");
       }
       return;
     }
@@ -1034,7 +1116,7 @@ function renderReminders(view) {
       toast("Отмечено отправленным");
       render();
     }
-  });
+  };
 }
 
 /* ═══════════ экран: настройки ═══════════ */
@@ -1126,6 +1208,7 @@ function renderSettings(view) {
 
 function lessonModal(prefill = {}) {
   const students = Store.activeStudents();
+  if (!students.length) { toast("Сначала добавьте ученика"); studentModal(); return; }
   const defDate = prefill.date || iso(today());
   const defTime = prefill.time || "18:00";
   const s0 = prefill.studentId || (students[0] && students[0].id);
@@ -1195,8 +1278,9 @@ function lessonModal(prefill = {}) {
     if (e.target.closest("#lm-save")) {
       const studentId = $("#lm-student", m).value;
       const st = Store.student(studentId);
+      if (!st) { toast("Выберите ученика"); return; }
       const date = $("#lm-date", m).value;
-      if (!date) { toast("Выбери дату"); return; }
+      if (!date) { toast("Укажите дату"); return; }
       const time = $("#lm-time", m).value;
       const dur = Number($("#lm-dur", m).value);
       const format = $("#lm-format .choice.active", m).dataset.v;
@@ -1206,7 +1290,7 @@ function lessonModal(prefill = {}) {
         Store.addLesson({ studentId, date: iso(addDays(fromIso(date), w * 7)), time, durationMin: dur, kind, format });
       }
       closeModal();
-      toast(weeks > 1 ? `Добавлено ${weeks} занятий` : "Занятие в расписании");
+      toast(weeks > 1 ? `Добавлено ${weeks} ${lessonsWord(weeks)}` : "Занятие в расписании");
       ui.weekStart = mondayOf(fromIso(date));
       ui.calMode = "week";
       if (ui.route !== "calendar") navigate("calendar"); else render();
@@ -1289,6 +1373,7 @@ function studentModal(editId) {
 
 function paymentModal(studentId) {
   const students = Store.activeStudents();
+  if (!students.length) { toast("Сначала добавьте ученика"); studentModal(); return; }
   const s0 = studentId || (students[0] && students[0].id);
 
   const m = el(`
@@ -1330,6 +1415,7 @@ function paymentModal(studentId) {
 
   const suggest = () => {
     const st = Store.student($("#pm-student", m).value);
+    if (!st) return;
     const size = Number($("#pm-what .choice.active", m).dataset.v);
     const p = Store.state.settings.prices;
     let sum;
@@ -1360,11 +1446,11 @@ function paymentModal(studentId) {
       const st = Store.student(sid);
       const size = Number($("#pm-what .choice.active", m).dataset.v);
       const amount = Number($("#pm-amount", m).value) || 0;
-      if (amount <= 0) { toast("Проверь сумму"); return; }
-      const comment = size > 1 ? `Абонемент ${size} занятий` : "Разовое занятие";
+      if (amount <= 0) { toast("Проверьте сумму"); return; }
+      const comment = size > 1 ? `Абонемент ${size} ${lessonsWord(size)}` : "Разовое занятие";
       Store.addPayment({ studentId: sid, amount, method: $("#pm-method", m).value, passSize: size, comment });
       closeModal();
-      toast(`${fmtMoney(amount)} от ${st.name.split(" ")[0]} — записано`);
+      toast(`Оплата записана: ${st.name.split(" ")[0]}, ${fmtMoney(amount)}`);
       render();
     }
   });

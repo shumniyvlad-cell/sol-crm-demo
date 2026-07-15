@@ -10,7 +10,11 @@ const DAY = 86400000;
 /* — утилиты дат — */
 function d0(date) { const d = new Date(date); d.setHours(0, 0, 0, 0); return d; }
 function today() { return d0(new Date()); }
-function addDays(date, n) { return new Date(d0(date).getTime() + n * DAY); }
+function addDays(date, n) {
+  const d = d0(date);
+  /* календарная арифметика вместо миллисекунд — не ломается на переводе часов (DST) */
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+}
 function iso(date) {
   const d = new Date(date);
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -348,8 +352,11 @@ const Store = {
       let p = this.passOf(studentId);
       if (p && p.used >= p.size) p = null;              /* исчерпан — новый */
       if (p && p.used < p.size) {
-        /* докупка к действующему: расширяем */
+        /* докупка к действующему: расширяем; отметки напоминаний сбрасываем,
+           иначе следующий цикл «осталось 3/1» посчитается уже отправленным */
         p.size += passSize; p.price += amount;
+        delete this.state.remindersSent[p.id + "_soft"];
+        delete this.state.remindersSent[p.id + "_final"];
       } else {
         this.state.passes = this.state.passes.filter(x => x.studentId !== studentId);
         this.state.passes.push({
@@ -397,10 +404,11 @@ const Store = {
         out.push({ student: st, remaining: 0, dueDate: today(), amount: this.renewalPrice(st.id), overdue: true });
         return;
       }
-      const due = this.passRunsOutOn(st.id);
-      if (!due) return;
+      /* нет будущих занятий в плане — оцениваем по 1 занятию в неделю, чтобы ученик не выпал из списка */
+      const exact = this.passRunsOutOn(st.id);
+      const due = exact || addDays(today(), rem * 7);
       if (due <= addDays(today(), 45)) {
-        out.push({ student: st, remaining: rem, dueDate: due, amount: this.renewalPrice(st.id), overdue: false });
+        out.push({ student: st, remaining: rem, dueDate: due, amount: this.renewalPrice(st.id), overdue: false, approx: !exact });
       }
     });
     return out.sort((a, b) => a.dueDate - b.dueDate);
